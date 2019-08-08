@@ -372,7 +372,7 @@ function embedStateDebuggingInfo (grammar) {
               <li><code>node lib/ace/mode/shexc_worker_test.js</code>, manually constructed validator tests</li>
               <li><code>node lib/ace/mode/_test/highlight_rules_test.js</code>, automatically constructed tests which include ones built from the generate operation above.
               <p>
-                If you're iterating on this, especially in the debugger, you can note the module number when your module comes up, e.g. "126 testing: shexc", and then run <code>node --inspect-brk lib/ace/mode/_test/highlight_rules_test.js 125</code> (note n - 1)
+                If you're iterating on this, especially in the debugger, you can note the module number when your module comes up, e.g. "126 testing: shexc", and then run <code>node --inspect-brk lib/ace/mode/_test/highlight_rules_test.js 125</code> (note n - 1).
               </p>
               </li>
             </ul>
@@ -380,6 +380,37 @@ function embedStateDebuggingInfo (grammar) {
           </ul>
         </li>
       </ul>
+    </section>
+
+    <section id="futureWork">
+      <h2>Future work</h2>
+      <p>
+        The ShExC Santa mode was hand-built by examining LALR(1) state tables to see which inputs were required at which point.
+        It would be fun and useful to create a set of semantic actions in Jison or Antlr to automatically construct the state table automatically.
+        Here's a strawman based on part of the <a href="https://shexspec.github.io/spec/#shexc">ShExC syntax</a>:
+      </p>
+      <pre>
+          PNAME_NS         {PN_PREFIX}? ':'
+          …
+          IRIREF           '&lt;' ([^\u0000-\u0020&lt;&gt;\"{}|^`\\] | {UCHAR})* '&gt;'
+          %%
+          {IRIREF}         "constant.language";
+          {PNAME_NS}       "constant.library";
+          %%
+          %start           shexDoc
+
+          shexDoc        : …
+          prefixDecl     : "PREFIX" { "keyword" } PNAME_NS IRIREF
+          notStartAction : start | shapeExprDecl
+          shapeExprDecl  : shapeExprLabel { "shapeExprLabel" }
+                           (shapeExpression | "EXTERNAL" { "keyword" } )
+          shapeExprLabel : iri | blankNode
+          iri            : IRIREF | prefixedName
+      </pre>
+      <p>
+        In this strawman, terminals return ace tokens (i.e. CSS classes) and rules that invokes terminals can append tokens.
+        If anyone wants to work with me on this (hint <a href="https://github.com/GerHobbelt">Ger Hobbelt</a>), let me know with an issue.
+      </p>
     </section>
   </body>
 </html>
