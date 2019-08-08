@@ -1,0 +1,385 @@
+<html>
+  <head>
+    <title>Grammar-based ACE Editor Mode</title>
+    <meta charset='utf-8'/>
+    <script src='https://www.w3.org/Tools/respec/respec-w3c-common' async="async" class='remove'></script>
+    <script>respecConfig = {editors: [ {name: "Eric Prud'hommeaux"} ], edDraftURI: "https://localhost/" }</script>
+  </head>
+  <body>
+
+    <section id="abstract">
+    <h2>Abstract</h2>
+    <p>
+      The Ace editor is an embeddable javascript editor, frequently used in webapps which evaluate some user-supplied code.
+      It has language-specific modes which help guide the user towards supplying syntacticaly-valid input.
+      These modes are mostly built to provide feedback about lexical consistency (e.g. spelling of keywords) and have piecemeal support for grammatical constraints (does the function name follow the keyword function).
+      This document describes the process for constructing a "Santa" ACE editor mode which provides validating, grammar-based editor feedback.
+    </p>
+    </section>
+
+    <section id="santaMode">
+      <h2>Santa mode</h2>
+      <p>
+        The "Santa" mode is so-named because
+      </p>
+      <ul>
+        <li>Everything is styled, so it tends to light up like a Christmas tree.</li>
+        <li>It flags grammatically invalid input; i.e. it knows if you've been bad or good.</li>
+      </ul>
+      <p>
+        This provides a user with highlighting feedback at the point of error, greatly reducing the searching around that users typically perform in an unfamiliar or complex language.
+      </p>
+    </section>
+
+    <section id="aceStateMachine">
+      <h2>Ace state machine</h2>
+      <p>
+        The Ace editor's syntax highlighting is managed by <code>modes</code> which are typically split across to files: <code>lib/ace/mode/FOO.js</code> and <code>lib/ace/mode/FOO_highlight_rules.js</code>.
+        These construct a state machine which the editor traverses in response to user input.
+        Each rule in the state machine has an associated <code>token</code> which the editor uses to markup the DOM in the HTML editor.
+        For a token "foo", the markup will include a span with the class "ace-foo".
+      </p>
+      <p>
+        The state machine maps production names to lists of rules.
+        Each rule maps a lexical pattern to a token and a state transition.
+        During execution ("tokenization" in the ACE API), it primarily uses three rule attributes to capture the lexical pattern, the associated class name, and the next state to go to.
+      </p>
+      <pre class="example javascript">
+PRODUCTION_NAME: [
+  {
+    regexp: "PATTERN",
+    token: "TOKEN" || onMatch: function (value, currentState, stack, line) => TOKEN,
+    next: "PRODUCTION_NAME" || next: function (currentState, stack) => PRODUCTION_NAME
+  }
+]
+      </pre>
+      <p>
+        For both the <code>onMatch</code> and <code>next</code> functions, the <code>this</code> parameter is the surrounding rule.
+        <code>line</code> is the entire line in the editor and <code>value</code> is the portion matched by the pattern.
+        <code>currentState</code> is a production name and the stack is an arbitrary list that the functions may manipulate.
+      </p>
+      <p>
+      
+      </p>
+      <section id="parserAnalog">
+        <h3>Parser analog</h3>
+        <p>
+          In principle, this is enough to construct an LR(1) parser which shifts tokens matched by the rule patterns and pops the stack to reduce to a computed state.
+          The patterns associated with each rule in a production provide are effectively a lexer.
+          While a lexer like Bison will accept the longest match when more than one pattern could match, the rules in a production must be ordered to accept the preferred pattern.
+          Another difference is that where typical lexers require explicit control from the parser to switch state, the patterns in each state's list of rules creates a novel lexer state.
+        </p>
+      </section>
+      <section id="construction">
+        <h3>Construction</h3>
+        <p>
+          To build a state machine, you typically extend an existing mode.
+          If there's no more specific mode, as there probably won't be for modes built from a grammar, you fall back to <code>TextHighlightRules</code>:
+        </p>
+        <pre class="example javascript">
+const TextHighlightRules = require("./text_highlight_rules").TextHighlightRules;
+oop.inherits(ShExCHighlightRules, TextHighlightRules);
+        </pre>
+        <p>
+          <code>this.$rules</code> is a state machine with at least a <code>start</code> element:
+        </p>
+        <pre class="example javascript">
+this.$rules = {
+  start: [
+    ... e.g. { token: "constant.string", regex: /"/, next: "myString" }
+  ],
+  myString: [ ... ],
+  ...
+}
+        </pre>
+        <p>
+          The ace code also calls the elements of those arrays <code>rules</code> so here I will paradoxically refer to <code>this.$rules</code> as the <code>productions</code>, i.e. it maps a state name to a rule list.
+        </p>
+        <p>
+          The productions language used to construct the state machine is more expressive than those navigated during tokenization.
+          <code>this.normalizeRules()</code> lightly pre-processes the productions, mapping this richer state machine language to the simple one described above in <a href="#aceStateMachine">§ Ace state machine</a>.
+          This affords the author several conveniences when authoring state machines:
+        </p>
+        <ul>
+          <li>
+            <em>nested arrays</em>: Rule lists containing rule lists (containing rule lists, etc.):
+            <pre class="example javascript">
+start: [
+  { token: "constant.language", regex: /&lt;/, next: "myURL" }
+  [ [ { token: "constant.string", regex: /"/, next: "myString" } ] ]
+],
+            </pre>
+            will get flattened out into a simple rule list for the current production.
+            This frees up generator functions to return any mixture of rules and arrays rules, so long as the outer production member is an array.
+          </li>
+          <li>
+            <em>include</em>: If the rule is a simple string (e.g. "#comments"), or if it's an object with an <code>include</code> member:
+            <pre class="example javascript">
+{ include: "#comments" }
+            </pre>
+            , inject the referenced rules into the current production.
+            The <code>include</code> member may also be an array, in which case all of the members will be injected into the current production.
+            Perversely, this even allows <code>{ include: ["foo", ["bar"] ] }</code> as ES6 permits <code>({a:1, b:2})[["b"]]</code> (that evaluates to 2).
+          </li>
+          <li>
+            <em><code>.push: ...</code> and <code>.next: "pop"</code> directives</em>: These are implemented as <code>.next</code> function calls to be executed when a rule is matched.
+          </li>
+          <li>
+            <em>invent productions for nested <code>.next</code>s and <code>.push</code>s</em>: A rule's <code>.next</code> can be a produciton name or a list of rules:
+            <pre class="example javascript">
+{ somethingWithComments: [
+  { token: "comment", regex: /\/\*/, next: [
+      { token: "comment", regex: "\\*\\/", next: "somethingWithComments" },
+      { defaultToken: "comment", caseInsensitive: true }
+  ] }
+] }
+            </pre>
+            These get turned into what are hopefully fresh production names (e.g. <code>comment0</code>) by taking the first string in (<code>.stateName</code>, <code>.token</code>, <code>.token[0]</code>).
+            If the <code>.token</code> will give you a conflicting or hard-to-read (for debugging) production name, add a distinctive <code>.stateName</code> to the containing rule.
+          </li>
+          <li>
+            <em>translate <code>{ start: S, end: E, next: [ L ] }</code> to a gosub</em>: For example:
+            <pre class="example javascript">
+start:
+  { token : "string", start : '"', end : '"|$', next: [
+    {token: "constant.language.escape", regex: /\\([tbrf'"n])/},
+    {token: "invalid", regex: /\\./}
+  ] }
+            </pre>
+            is transformed to:
+            <pre class="example javascript">
+"start": [
+  { regex: "\"", token : "string.start", next: pushState } // token + ".start"
+],
+"string.start": [
+  { regex: /\\([tbrf'"n])/, token: "constant.language.escape" }
+  { regex: /\\./, token: "invalid" }
+  { defaultToken: "string" }
+  { regex: ""|$", token: "string.end", next: popState } // token + ".end"
+]
+            </pre>
+          </li>
+          <li>
+            <em>promote nested <code>.rules</code> to top-level</em>: If there's a <code>.rules</code> object, for each <code>(KEY, [MEMBERS])</code>, append MEMBERS to rules[KEY].
+          </li>
+          <li>
+            <em>call <code>this.createKeywordMapper(rule.keywordMap, rule.defaultToken || "text", rule.caseInsensitive)</code> on <code>keywordMap</code> members</em>
+          </li>
+        </ul>
+      </section>
+      <section id="almostLRParser">
+        <h3>Almost LR parser</h3>
+        <p>
+          Because the Ace engine isn't producing an AST, we don't need to reduce multiple shift states to produce a computed result.
+          For the purposes of the <a href="http://shex.io/shex-semantics/#shexc">ShEx</a> Santa mode, it was sufficient to augment the state machine generator to include both a gosub and a goto to return to when the nested state popped.
+        </p>
+      </section>
+    </section>
+
+    <section id="lexingRules">
+      <h3>Lexing rules</h3>
+      <p>
+        Typical lexers are responsible for tokenizing and skipping whitespace and comments.
+        The Ace parser is different for two reasons:
+      </p>
+      <ul>
+        <li>Regular expressions skipping whitespace and all comment forms would be bloated and difficult to maintain.</li>
+        <li>Most syntax highlighters mark up comments rather than skipping over them.</li>
+      </ul>
+      <p>
+        The ShExC Santa mode follows a convention that all grammar states manifest in top-level productions and all tokens are represented as nested <code>.next</code> or <code>.push</code> rules.
+        This makes it easy to iterate over the productions and prepend comment rules in them.
+        This must be done before calling <code>this.normalizeRules()</code> as it will create top-level rules for all nested rules.
+        A <code>noCommentList</code> excluded some states from having embedded comment rules:
+      </p>
+      <pre class="example javascript">
+const noCommentList = ["start", "regex", "regex_character_class"]
+Object.keys(this.$rules)
+  .filter(name => noCommentList.indexOf(name) === -1)
+  .forEach(name => addComments(this.$rules[name]))
+this.normalizeRules()
+      </pre>
+      <p>
+        It's tempting to align the highlight_rules state names with productions in your grammar.
+        Since the tokenizer has <code>start</code> hard-coded as a start state (and where to go in case of missing production), you must automatically transition to your top grammar state; in the ShExC case, that was <code>shexDoc</code>:
+      </p>
+      <pre class="example javascript">
+        start: [ { regex: /(?:)/, next: "shexDoc" } ]
+      </pre>
+      <p>
+        Since the <code>testBlockComment</code> function in <code>highlight_rules_test.js</code> expects that a block comment introduced in the <code>start</code> state will return you to <code>start</code>, your highlight_rules will need to add redunant comments rules to the start state.
+      </p>
+    </section>
+
+    <section id="testing">
+      <h2>Testing</h2>
+      <p>
+        For any mode (here, called "foo") <code>lib/ace/mode/foo.js</code>, the convention is to place its associated test in <code>lib/ace/mode/foo_test.js</code>.
+        This files exports an object like:
+      </p>
+      <pre class="example javascript">
+module.exports = {
+  const EditSession = require("../edit_session").EditSession;
+  const Tokenizer = require("../tokenizer").Tokenizer;
+  const FooMode = require("./foo").Mode;
+  const assert = require("../test/assertions");
+
+  some: "internal stuff",
+  my_internal: function (...) { ... },
+  "test: Some Test Description": function () {
+    ... assert.equal(expected, go)
+  }
+}
+      </pre>
+      <p>
+        The Ace test runner will run everything in <code>module.exports</code> that matches <code>/^[>\!]?test/</code>.
+        Including this at the bottom allows you to run your test on its own with <code>node --inspect-brk lib/ace/mode/foo_test.js</code>:
+      </p>
+      <pre class="example javascript">
+if (typeof module !== "undefined" &amp;&amp; module === require.main) {
+  Async.test.testcase(module.exports).exec();
+}
+      </pre>
+      <section id="dynamicTests">
+        <h3>Dynamic tests</h3>
+        <p>
+          Like most language specifications, ShEx includes a suite of <a href="">positive</a> and <a href="">negative</a> syntax tests which amply exercise any parser.
+        </p>
+      </section>
+
+      <section id="testingAcceptState">
+        <h3>testing the accept state</h3>
+        <p>
+          Because Ace's state machine doesn't have an explicit accept state, the one can append each test with a symbol only permitted in an outer context.
+          The <code>getTokens(i)</code> function used above doesn't report the final production name so we need to determine the production in a somewhat oblique fashion.
+          Because ShEx has text that can only appear in the accept state, we could add that text to the input array:
+        </p>
+        <pre class="example javascript">
+const rows = file.data.split(/\n/)
+      .concat(["PREFIX qwer: &lt;&gt;"]) // Make sure we end up in the shexDoc production.
+        </pre>
+        <p>
+          This extra text would be rejected if the state machine were left in any state other than the accept state.
+        </p>
+      </section>
+    </section>
+
+    <section id="debugging">
+      <h2>Debugging</h2>
+      <p>
+        A frequent error is to transition to a non-existent state.
+        When this happens, the tokenizer flags an error and returns to the <code>start</code> state.
+        We can add more detail to this error report, which you'll find in <code>lib/ace/tokenizer.js</code> in the <code>getLineTokens()</code> function (line 292 as of July 2019):
+      </p>
+      <pre class="example javascript">
+if (!state) {
+  this.reportError(startState + "-&gt;" + currentState + " on "
+                   + match[i+1] + ": state doesn't exist for rule "
+                   + i + ":" + JSON.stringify(rule), currentState);
+      </pre>
+      <p>
+        Another frequent issue is simply getting lost wondering what state you're in at some point in the text array.
+        We can leverage the kitchen-sink demo's [Show token info] option (bottom of the left option list) by appending the state information to each token:
+      </p>
+      <pre class="example javascript">
+this.normalizeRules()
+// embedStateDebuggingInfo(this.$rules)
+
+function embedStateDebuggingInfo (grammar) {
+  Object.values(grammar).forEach(
+    rules =>
+      rules.forEach(
+        rule =>
+          rule.onMatch = function (matched, currentState, stack) {
+            console.log(this, matched, currentState, stack)
+            return this.token + "\n" + currentState + "\n"
+                   + "(" + stack.join("|") + ")\n"
+                   + JSON.stringify(rule, null, 2)
+          }
+      )
+  )
+}
+      </pre>
+    </section>
+
+    <section id="process">
+      <h2>Process overview</h2>
+      <p>
+        This process describes the creation of the ShExC Ace Santa mode:
+      </p>
+      <ul>
+        <li>
+          <em>create/copy mode and highlighter</em>:
+          <ul>
+            <li><code>lib/ace/mode/shexc.js</code></li>
+            <li><code>lib/ace/mode/shexc_highlight_rules.js</code></li>
+          </ul>
+          <p>
+            The custom is for the mode file to reference externally-defined highlight rules:
+          </p>
+          <pre class="example javascript">
+            var ShExCHighlightRules = require("./shexc_highlight_rules").ShExCHighlightRules;
+          </pre>
+        </li>
+        <li>
+          <em>create/copy example files</em>:
+          <ul>
+            <li><code>demo/kitchen-sink/docs/shexc.shex</code></li>
+            <li><code>lib/ace/mode/_test/text_shexc.txt</code></li>
+          </ul>
+          <p>
+            I use the same text in both.
+            This would seem to call out for a symlink but that might be problematic for windows users.
+          </p>
+        </li>
+        <li>
+          <em>tell kitchen_sink example about the new files</em>
+          <p>
+            edit <code>lib/ace/ext/modelist.js</code>
+          </p>
+        </li>
+        <li>
+          <em>create mode test</em>:
+          <ul>
+            <li><code>lib/ace/mode/shexc_test.js</code></li>
+          </ul>
+        </li>
+        <li>
+          <em>generate <code>lib/ace/mode/_test/tokens_shexc.json</code></em>:
+          <pre class="example javascript">node lib/ace/mode/_test/highlight_rules_test.js -gen</pre>
+          <p>
+            Every time you fiddle with the example files or the highlight rules, you'll have to re-gen.
+          </p>
+        </li>
+        <li>
+          <em>create a worker and dependent files</em>
+          <ul>
+            <li><code>ib/ace/mode/shexc_worker.js</code></li>
+          </ul>
+        </li>
+        <li>
+          <em>create worker tests</em>
+          <ul>
+            <li><code>lib/ace/mode/shexc_worker_test.js</code></li>
+          </ul>
+        </li>
+        <li>
+          <em>run tests</em>:
+          <ul>
+            <li><code>node lib/ace/test/all.js</code>, which is made up of:
+            <ul>
+              <li><code>node lib/ace/mode/shexc_test.js</code>, manually constructed markup tests</li>
+              <li><code>node lib/ace/mode/shexc_worker_test.js</code>, manually constructed validator tests</li>
+              <li><code>node lib/ace/mode/_test/highlight_rules_test.js</code>, automatically constructed tests which include ones built from the generate operation above.
+              <p>
+                If you're iterating on this, especially in the debugger, you can note the module number when your module comes up, e.g. "126 testing: shexc", and then run <code>node --inspect-brk lib/ace/mode/_test/highlight_rules_test.js 125</code> (note n - 1)
+              </p>
+              </li>
+            </ul>
+            </li>
+          </ul>
+        </li>
+      </ul>
+    </section>
+  </body>
+</html>
