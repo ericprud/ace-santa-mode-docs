@@ -360,8 +360,8 @@ ace.define("ace/mode/shexc_highlight_rules",["require","exports","module","ace/l
           token : "comment.doc",
           regex : "\\/\\*(?=\\*)",
           push: [
-            {
-              regex : "(?<![a-zA-Z0-9_+])@[\\w\\d_]+", // TODO: all email chars before '@'
+            { // this negative look behind not yet supported in firefox: (?<![a-zA-Z0-9_+]) is a 
+              regex : "@[\\w\\d_]+", // TODO: all email chars before '@'
               token : "comment.doc.tag",
             },
             DocCommentHighlightRules.getTagRule(),
